@@ -57,6 +57,10 @@ fun handleMessage(player: Player, message: String) {
             }
         }
 
+        "ATTACK_MELEE" -> {
+            println("Melee Attack received from: ${player.id}")
+        }
+
         // You just keep adding more commands here as your game grows
         // "INTERACT", "PICKUP", "USE_ITEM", "CHAT", whatever you need
 
