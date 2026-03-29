@@ -16,7 +16,6 @@ import com.badlogic.gdx.scenes.scene2d.ui.Skin
 import com.badlogic.gdx.scenes.scene2d.ui.TextButton
 import com.badlogic.gdx.scenes.scene2d.ui.Touchpad
 import com.badlogic.gdx.utils.viewport.ScreenViewport
-import jackA.MaM.E4048541.GameMessage.Companion.BASE_MESSAGE_SIZE
 import ktx.app.KtxGame
 import ktx.app.KtxScreen
 import ktx.app.clearScreen
@@ -24,79 +23,6 @@ import ktx.assets.disposeSafely
 import ktx.async.KtxAsync
 import java.nio.ByteBuffer
 import kotlin.math.sqrt
-
-enum class GameAction(val id: Byte) {
-    MOVE(1), ATTACK_MELEE(2);
-
-    companion object {
-        fun fromId(id: Byte) = entries.first { it.id == id }
-    }
-}
-
-data class GameMessage(
-    val playerID: String,
-    val x: Float,
-    val y: Float,
-    val action: GameAction)
-{
-    // Convenient toString() for printing to terminal
-    override fun toString() =
-        with(StringBuilder()) {
-            append("\tPLAYER ID: $playerID\n")
-            append("\tPosition: ($x, $y)\n")
-            append("\tAction: $action")
-            toString()
-        }
-
-    companion object {
-        const val BASE_MESSAGE_SIZE =
-            (2 * Float.SIZE_BYTES) +
-                (2 * Byte.SIZE_BYTES) + 1
-    }
-}
-
-// This function converts GameMessages into bytes for sending across the network
-fun GameMessage.toByteArray(): ByteArray =
-    with(playerID.toByteArray(Charsets.UTF_8)) {
-        ByteBuffer
-            .allocate( size + BASE_MESSAGE_SIZE)
-            .apply {
-                // "put" is a relative method, which writes the byte given to it into this buffer
-                // it will be "put" at the current position and the position in the buffer is
-                // incremented for the next byte to be placed at!
-                put(size.toByte()) // 1 byte
-                put(this@with) // n-bytes
-                putFloat(x) // 4 bytes
-                putFloat(y) // 4 bytes
-                put(action.id) // 1 byte
-            }.array()
-    }
-
-fun GameMessage.Companion.buildFromBuiltArray(byteArray: ByteArray) =
-    // ByteBuffer.wrap(byteArray) -> wraps the passed through byteArray into a buffer.
-    // The new buffer's capacity and limit will be array.length
-    // This makes it so that any alterations to this byteBuffer will now affect the array
-    // and vice versa. Additionally, its byte order will be Big Endian.
-    with(ByteBuffer.wrap(byteArray)){
-        // "get()" (similar to put) reads the byte at the current position and increments the position
-        // Read the byte length of the PlayerID, this tells us how long the playersID is!
-        // With this information, we can tell the buffer to "skip" the first X amount of bytes
-        // If the ID was "John", get would read the first byte see its 4 bytes long
-        val playerIDLength = get().toInt()
-        val rawPlayerID = ByteArray(playerIDLength)
-
-        // grabs specific bytes and converts them to UTF-8 String (computer to human)
-        get(rawPlayerID)
-        val playerID = String(rawPlayerID, Charsets.UTF_8)
-
-        val x = getFloat() // can also use shorthand -> float
-        val y = getFloat()
-
-        // Read the GameAction - single byte
-        val action = GameAction.fromId(get())
-
-        GameMessage(playerID, x, y, action)
-    }
 
 class Main : KtxGame<KtxScreen>() {
 
@@ -165,7 +91,7 @@ class FirstScreen : KtxScreen {
 
         meleeButton.addListener(object : ClickListener() {
             override fun clicked(event: InputEvent, x: Float, y: Float) {
-                network.send("ATTACK_MELEE")
+                network.send(GameMessage.AttackMelee().toBytes())
             }
         })
 
@@ -222,35 +148,31 @@ class FirstScreen : KtxScreen {
 
     private fun processServerMessages() {
         for (message in network.getMessages()) {
-            val parts = message.split(":")
-
-            when (parts[0]) {
-                "MOVE" -> {
-                    val id = parts[1].toInt()
-                    val x = parts[2].toFloat()
-                    val y = parts[3].toFloat()
-
-                    // Don't update ourselves from the server — we already know where we are
-                    if (id != network.myId) {
-                        otherPlayers[id] = Pair(x, y)
+            when (message) {
+                is GameMessage.Move -> {
+                    if (message.playerID != network.myId) {
+                        otherPlayers[message.playerID.toInt()] = Pair(message.x, message.y)
                     }
                 }
 
-                "PLAYER_JOINED" -> {
-                    val id = parts[1].toInt()
-                    val x = parts[2].toFloat()
-                    val y = parts[3].toFloat()
-
-                    if (id != network.myId) {
-                        otherPlayers[id] = Pair(x, y)
-                        println("Player $id joined the game!")
+                is GameMessage.PlayerJoined -> {
+                    if (message.playerID != network.myId) {
+                        otherPlayers[message.playerID.toInt()] = Pair(message.x, message.y)
+                        println("Player ${message.playerID} joined the game!")
                     }
                 }
 
-                "PLAYER_LEFT" -> {
-                    val id = parts[1].toInt()
-                    otherPlayers.remove(id)
-                    println("Player $id left the game")
+                is GameMessage.PlayerLeft -> {
+                    otherPlayers.remove(message.playerID.toInt())
+                    println("Player ${message.playerID} left the game")
+                }
+
+                is GameMessage.Welcome -> {
+                    // Already handled in NetworkClient
+                }
+
+                is GameMessage.AttackMelee -> {
+                    // TODO: show attack visual for this player
                 }
             }
         }

@@ -17,7 +17,7 @@ class Player(
     // Method reference to check wall collisions
     private val collisionCheck: (Float, Float) -> Boolean,
     // Method reference to send network messages
-    private val sendNetworkMessage: (String) -> Unit
+    private val sendNetworkMessage: (ByteArray) -> Unit
 ) : BasePlayer()
 {
     fun handleInput(touchpad: Touchpad, delta: Float)
@@ -44,7 +44,7 @@ class Player(
                 if (!collisionCheck(X, Y + moveY))
                     Y += moveY
 
-                sendNetworkMessage("MOVE:$X:$Y")
+                sendNetworkMessage(GameMessage.Move(x = X, y = Y).toBytes())
             }
         }
     }

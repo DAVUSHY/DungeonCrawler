@@ -1,41 +1,49 @@
 package jackA.MaM.E4048541
 
+import java.io.DataInputStream
+import java.io.DataOutputStream
 import java.net.Socket
+import java.nio.ByteBuffer
 
-class NetworkClient(private val host: String, private val port: Int)
-{
+class NetworkClient(private val host: String, private val port: Int) {
     private var socket: Socket? = null
-    private var input: java.io.BufferedReader? = null
-    private var output: java.io.BufferedWriter? = null
+    private var input: DataInputStream? = null
+    private var output: DataOutputStream? = null
 
-    // Our ID assigned by the server
-    var myId: Int = -1
+    var myId: Short = -1
 
     // Messages that have arrived but haven't been processed yet
-    // Think of it as a mailbox — the network thread puts messages in,
-    // the game thread takes them out
-    private val incomingMessages = mutableListOf<String>()
+    // Its kind of like a letter box the network thread puts messages in,
+    // the game thread takes them out (recipient)
+    private val incomingMessages = mutableListOf<GameMessage>()
 
     fun connect() {
-        // Start the network stuff on a separate thread
         Thread {
             try {
                 socket = Socket(host, port)
-                input = socket!!.getInputStream().bufferedReader()
-                output = socket!!.getOutputStream().bufferedWriter()
+                input = DataInputStream(socket!!.getInputStream())
+                output = DataOutputStream(socket!!.getOutputStream())
                 println("Connected to server!")
 
-                // Read messages forever in this thread
                 while (true) {
-                    val message = input!!.readLine() ?: break
+                    // Read the 2-byte length prefix
+                    val lengthBytes = ByteArray(2)
+                    input!!.readFully(lengthBytes)
+                    val length = ByteBuffer.wrap(lengthBytes).short.toInt()
+
+                    // Read exactly that many bytes
+                    val payload = ByteArray(length)
+                    input!!.readFully(payload)
+
+                    // Parse into a GameMessage
+                    val message = GameMessage.fromBytes(ByteBuffer.wrap(payload))
 
                     // If it's the welcome message, grab our ID
-                    if (message.startsWith("WELCOME:")) {
-                        myId = message.split(":")[1].toInt()
+                    if (message is GameMessage.Welcome) {
+                        myId = message.playerID
                         println("I am player $myId")
                     }
 
-                    // Put the message in the mailbox for the game thread to process
                     synchronized(incomingMessages) {
                         incomingMessages.add(message)
                     }
@@ -46,16 +54,15 @@ class NetworkClient(private val host: String, private val port: Int)
         }.start()
     }
 
-    // Send a message to the server
-    fun send(message: String) {
+    // Send raw bytes to the server
+    fun send(bytes: ByteArray) {
         Thread {
             try {
-                println("Attempting to send: $message, output is: $output")
                 output?.let {
-                    it.write(message)
-                    it.newLine()
-                    it.flush()
-                    println("Sent successfully: $message")
+                    synchronized(it) {
+                        it.write(bytes)
+                        it.flush()
+                    }
                 }
             } catch (e: Exception) {
                 println("Send error: ${e.message}")
@@ -63,8 +70,7 @@ class NetworkClient(private val host: String, private val port: Int)
         }.start()
     }
 
-    // Grab all waiting messages (called by the game thread each frame)
-    fun getMessages(): List<String> {
+    fun getMessages(): List<GameMessage> {
         synchronized(incomingMessages) {
             val copy = incomingMessages.toList()
             incomingMessages.clear()

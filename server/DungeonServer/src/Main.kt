@@ -1,101 +1,86 @@
 import java.net.ServerSocket
 import java.net.Socket
+import java.io.DataInputStream
+import java.io.DataOutputStream
+import java.nio.ByteBuffer
 
 // --- GAME STATE ---
-// This is what the server "knows" about the world
+// what the server "knows" about the world
 
 data class Player(
-    val id: Int,
+    val id: Short,
     val socket: Socket,
+    val input: DataInputStream,
+    val output: DataOutputStream,
     var x: Float = 0f,
     var y: Float = 0f,
     var health: Int = 100
 )
 
 // All connected players
-val players = mutableMapOf<Int, Player>()
-var nextPlayerId = 1
+val players = mutableMapOf<Short, Player>()
+var nextPlayerId: Short = 1
 
 // --- MESSAGE HANDLING ---
-// This is the "brain" — it decides what to do with each message
+// This is the "brain", deciding what to do with each message
 
-fun handleMessage(player: Player, message: String) {
-    // Split "MOVE:5.0:3.0" into ["MOVE", "5.0", "3.0"]
-    val parts = message.split(":")
-    // Splits message wherever there is a :
-    // Leaves you with:
-    //parts[0] = "MOVE"
-    //parts[1] = "5.0"
-    //parts[2] = "3.0"
+fun handleMessage(player: Player, message: GameMessage) {
+    when (message) {
+        is GameMessage.Move -> {
+            player.x = message.x
+            player.y = message.y
+            println("Player ${player.id} moved to ${message.x}, ${message.y}")
 
-    when (parts[0]) {
-        "MOVE" -> {
-            val x = parts[1].toFloat()
-            val y = parts[2].toFloat()
-
-            // Update this player's position on the server
-            player.x = x
-            player.y = y
-
-            // Tell everyone where this player moved
-            println("Player ${player.id} moved to $x, $y")
-            broadcast("MOVE:${player.id}:$x:$y")
+            // Broadcast to everyone with this player's ID attached
+            val broadcastMsg = GameMessage.Move(player.id, message.x, message.y)
+            broadcast(broadcastMsg.toBytes())
         }
 
-        "ATTACK" -> {
-            val targetId = parts[1].toInt()
-            val target = players[targetId]
-
-            if (target != null) {
-                // Simple damage calculation
-                target.health -= 10
-                broadcast("DAMAGE:${target.id}:${target.health}")
-
-                if (target.health <= 0) {
-                    broadcast("DIED:${target.id}")
-                }
-            }
+        is GameMessage.AttackMelee -> {
+            println("Melee attack from player ${player.id}")
+            // TODO: check nearby enemies, calculate damage, broadcast results
         }
 
-        "ATTACK_MELEE" -> {
-            println("Melee Attack received from: ${player.id}")
-        }
-
-        // You just keep adding more commands here as your game grows
-        // "INTERACT", "PICKUP", "USE_ITEM", "CHAT", whatever you need
-
-        else -> {
-            println("Unknown message from player ${player.id}: $message")
-        }
+        // The server shouldn't receive these — it sends them
+        is GameMessage.Welcome -> {}
+        is GameMessage.PlayerJoined -> {}
+        is GameMessage.PlayerLeft -> {}
     }
 }
 
 // --- NETWORKING (same as before, barely changed) ---
 
 fun handlePlayer(player: Player) {
-    val input = player.socket.getInputStream().bufferedReader()
-    val output = player.socket.getOutputStream().bufferedWriter()
+    // Send welcome with their assigned ID
+    val welcomeMsg = GameMessage.Welcome(player.id)
+    sendToPlayer(player, welcomeMsg.toBytes())
 
-    // Tell this player their ID
-    output.write("WELCOME:${player.id}")
-    output.newLine()
-    output.flush()
-
-    // Also tell them about every player already in the game
+    // Tell this player about everyone already in the game
     for ((_, other) in players) {
         if (other.id != player.id) {
-            output.write("PLAYER_JOINED:${other.id}:${other.x}:${other.y}:${other.health}")
-            output.newLine()
-            output.flush()
+            val joinedMsg = GameMessage.PlayerJoined(other.id, other.x, other.y)
+            sendToPlayer(player, joinedMsg.toBytes())
         }
     }
 
-    // Tell everyone else that this player joined
-    broadcast("PLAYER_JOINED:${player.id}:${player.x}:${player.y}:${player.health}")
+    // Tell everyone else this player joined
+    val newPlayerMsg = GameMessage.PlayerJoined(player.id, player.x, player.y)
+    broadcast(newPlayerMsg.toBytes())
 
+    // Main read loop
     try {
         while (true) {
-            val message = input.readLine() ?: break
+            // Read the 2-byte length prefix
+            val lengthBytes = ByteArray(2)
+            player.input.readFully(lengthBytes)
+            val length = ByteBuffer.wrap(lengthBytes).short.toInt()
+
+            // Read exactly that many bytes for the payload
+            val payload = ByteArray(length)
+            player.input.readFully(payload)
+
+            // Parse the message
+            val message = GameMessage.fromBytes(ByteBuffer.wrap(payload))
             handleMessage(player, message)
         }
     } catch (e: Exception) {
@@ -105,19 +90,26 @@ fun handlePlayer(player: Player) {
     println("Player ${player.id} disconnected")
     players.remove(player.id)
     player.socket.close()
-    broadcast("PLAYER_LEFT:${player.id}")
+
+    val leftMsg = GameMessage.PlayerLeft(player.id)
+    broadcast(leftMsg.toBytes())
 }
 
-fun broadcast(message: String) {
-    for ((_, player) in players) {
-        try {
-            val output = player.socket.getOutputStream().bufferedWriter()
-            output.write(message)
-            output.newLine()
-            output.flush()
-        } catch (e: Exception) {
-            println("Failed to send to player ${player.id}")
+fun sendToPlayer(player: Player, bytes: ByteArray) {
+    try {
+        // synchronized so two threads can't write to the same player at once
+        synchronized(player.output) {
+            player.output.write(bytes)
+            player.output.flush()
         }
+    } catch (e: Exception) {
+        println("Failed to send to player ${player.id}")
+    }
+}
+
+fun broadcast(bytes: ByteArray) {
+    for ((_, player) in players) {
+        sendToPlayer(player, bytes)
     }
 }
 
@@ -128,7 +120,9 @@ fun main() {
     while (true) {
         val socket = serverSocket.accept()
         val id = nextPlayerId++
-        val player = Player(id, socket)
+        val input = DataInputStream(socket.getInputStream())
+        val output = DataOutputStream(socket.getOutputStream())
+        val player = Player(id, socket, input, output)
         players[id] = player
         println("Player $id connected")
 
