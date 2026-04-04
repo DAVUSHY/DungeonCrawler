@@ -174,6 +174,10 @@ class FirstScreen : KtxScreen {
                 is GameMessage.AttackMelee -> {
                     // TODO: show attack visual for this player
                 }
+
+                is GameMessage.AttackResult -> {
+                    // TODO: implement data for attack
+                }
             }
         }
     }

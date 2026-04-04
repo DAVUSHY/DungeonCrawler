@@ -17,6 +17,9 @@ data class Player(
     var health: Int = 100
 )
 
+val attackRadius: Int = 5
+val attackDamage: Float = 20.0f
+
 // All connected players
 val players = mutableMapOf<Short, Player>()
 var nextPlayerId: Short = 1
@@ -39,6 +42,33 @@ fun handleMessage(player: Player, message: GameMessage) {
         is GameMessage.AttackMelee -> {
             println("Melee attack from player ${player.id}")
             // TODO: check nearby enemies, calculate damage, broadcast results
+
+            val attacker = players[player.id]
+
+            for (target in players.values) 
+            {
+                if (target != attacker) 
+                {
+                    val dx = target.x - attacker.x
+                    val dy = target.y - attacker.y
+
+                    // pythag to calc dist in radius
+                    val dist = sqrt((dx * dx) + (dy * dy))
+
+                    // check if the target is within the attack radius
+                    if (dist <= attackRadius)
+                    {
+                        val newHealth = target.health - attackDamage
+
+                        // apply the new health on the servers version of the target
+                        target.health = newHealth
+
+                        // then tell everyone else
+                        val attackMessage = GameMessage.AttackResult(target.id, newHealth)
+                        broadcast(attackMessage.toBytes())
+                    }
+                }
+            }
         }
 
         // The server shouldn't receive these — it sends them

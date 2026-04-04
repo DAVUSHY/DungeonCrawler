@@ -1,5 +1,6 @@
 package jackA.MaM.E4048541
 
+import com.badlogic.gdx.Game
 import java.nio.ByteBuffer
 
 sealed class GameMessage {
@@ -11,6 +12,7 @@ sealed class GameMessage {
         const val TYPE_PLAYER_LEFT: Byte = 3
         const val TYPE_ATTACK_MELEE: Byte = 4
         const val TYPE_WELCOME: Byte = 5
+        const val TYPE_ATTACK_RESULT: Byte = 6
 
         // Reads the type byte and delegates to the right subclass
         fun fromBytes(buffer: ByteBuffer): GameMessage {
@@ -21,6 +23,7 @@ sealed class GameMessage {
                 TYPE_PLAYER_LEFT -> PlayerLeft.fromBytes(buffer)
                 TYPE_ATTACK_MELEE -> AttackMelee.fromBytes(buffer)
                 TYPE_WELCOME -> Welcome.fromBytes(buffer)
+                TYPE_ATTACK_RESULT -> AttackResult.fromBytes(buffer)
                 else -> throw IllegalArgumentException("Unknown message type: $type")
             }
         }
@@ -155,6 +158,30 @@ sealed class GameMessage {
             fun fromBytes(buffer: ByteBuffer): Welcome {
                 val playerID = buffer.short
                 return Welcome(playerID)
+            }
+        }
+    }
+
+    // --- ATTACK RESULT ---
+    data class AttackResult(
+        val targetID: Short,
+        val newHealth: Int
+    ) : GameMessage() {
+
+        override fun toBytes(): ByteArray {
+            val payload = ByteBuffer.allocate(1 + 2 + 4)
+                .put(TYPE_ATTACK_RESULT)
+                .putShort(targetID)
+                .putInt(newHealth)
+                .array()
+            return wrapWithLength(payload)
+        }
+
+        companion object {
+            fun fromBytes(buffer: ByteBuffer): AttackResult{
+                val targetID = buffer.short
+                val newHealth = buffer.int
+                return AttackResult(targetID, newHealth)
             }
         }
     }
