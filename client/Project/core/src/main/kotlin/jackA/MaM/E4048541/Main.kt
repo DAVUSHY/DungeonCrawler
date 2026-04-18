@@ -12,9 +12,12 @@ import com.badlogic.gdx.scenes.scene2d.InputEvent
 import com.badlogic.gdx.scenes.scene2d.utils.ClickListener
 import com.badlogic.gdx.scenes.scene2d.InputListener
 import com.badlogic.gdx.scenes.scene2d.Stage
+import com.badlogic.gdx.scenes.scene2d.ui.Label
 import com.badlogic.gdx.scenes.scene2d.ui.Skin
 import com.badlogic.gdx.scenes.scene2d.ui.TextButton
+import com.badlogic.gdx.scenes.scene2d.ui.TextField
 import com.badlogic.gdx.scenes.scene2d.ui.Touchpad
+import com.badlogic.gdx.scenes.scene2d.ui.VerticalGroup
 import com.badlogic.gdx.utils.viewport.ScreenViewport
 import ktx.app.KtxGame
 import ktx.app.KtxScreen
@@ -41,8 +44,15 @@ class FirstScreen : KtxScreen {
     // "10.0.2.2" is how the Android emulator refers to your PC's localhost
     private val network = NetworkClient("10.0.2.2", 9999)
 
+    private val udpClient = UdpClient("10.0.2.2")
+    private val chatMessages = mutableListOf<String>()
+    private lateinit var chatInput: TextField
+    private lateinit var sendButton: TextButton
+
+    private lateinit var chatGroup: VerticalGroup
+
     // Map renderer
-    private val map = TmxMapLoader().load("DungeonCrawlerMap.tmx")
+    private val map = TmxMapLoader().load("DungeonMap.tmx")
     private val mapRenderer = OrthogonalTiledMapRenderer(map)
 
     // Camera - controlling which part of the map we are looking at
@@ -53,6 +63,13 @@ class FirstScreen : KtxScreen {
         network::send
     )
 
+    // Win con related
+    private var gameOver = false
+    private var winnerID: Short = -1
+    private lateinit var gameOverLabel: Label
+
+    private lateinit var restartButton: TextButton
+
     // UI
     private lateinit var skin: Skin
     private lateinit var stage: Stage
@@ -61,13 +78,40 @@ class FirstScreen : KtxScreen {
     private var touchpadY: Float = (Gdx.graphics.height * 0.15).toFloat()
     private var touchpadSize = 200f
 
+    private lateinit var parryButton: TextButton
+    private var parryButtonX: Float = 0f
+    private var parryButtonY: Float = 0f
+
+    private var isParrying = false
+    private var parryVisualTimer = 0f
+    private val parryVisualDuration = 0.5f
+
+    private lateinit var lightButton: TextButton
     private lateinit var meleeButton: TextButton
     private var meleeButtonX: Float = (Gdx.graphics.width * 0.9).toFloat()
     private var meleeButtonY: Float = (Gdx.graphics.height * 0.15).toFloat()
     private var meleeButtonSize = 100f
 
-    // Other players — a map of ID to their position
-    private val otherPlayers = mutableMapOf<Int, Pair<Float, Float>>()
+    private val attackVisuals = mutableMapOf<Int, Float>()
+    private val windupVisuals = mutableMapOf<Int, Float>()
+    private val parryVisuals = mutableMapOf<Int, Float>()
+    private val attackVisualDuration = 0.2f
+    private var maxWindupDuration = 2.0f
+
+    private var localAttackTimer = 0f
+    private var localWindupTimer = 0f
+
+    private val windupVisualRadius = 10f
+
+    private var isHoldingHeavy = false
+
+    val attackRadius: Float = 20.0f
+
+    private val killCounts = mutableMapOf<Int, Int>()
+    private lateinit var killLabel: Label
+
+    // Other players which is a map of players keyed by IDs
+    private val otherPlayers = mutableMapOf<Int, OtherPlayer>()
 
     // Track if we've connected yet
     private var connected = false
@@ -79,23 +123,154 @@ class FirstScreen : KtxScreen {
         stage = Stage(ScreenViewport())
 
         //Begin layout
+
+        restartButton = TextButton("Restart", skin)
+        restartButton.setSize(150f, 60f)
+        restartButton.setPosition(
+            (Gdx.graphics.width / 2f) - 75f,
+            (Gdx.graphics.height / 2f) - 80f
+        )
+        restartButton.isVisible = false
+        restartButton.addListener(object : ClickListener() {
+            override fun clicked(event: InputEvent, x: Float, y: Float) {
+                network.send(GameMessage.RestartRequest(player.ID).toBytes())
+                restartButton.isVisible = false
+            }
+        })
+        stage.addActor(restartButton)
+
+        // --- GAME OVER ---
+        gameOverLabel = Label("", skin)
+        gameOverLabel.setPosition(
+            (Gdx.graphics.width / 2f) - 100f,
+            (Gdx.graphics.height / 2f)
+        )
+        gameOverLabel.isVisible = false
+        stage.addActor(gameOverLabel)
+
+        // --- TOUCHPAD ---
         touchpad = Touchpad(20f, skin)
         touchpad.setSize(touchpadSize, touchpadSize)
         touchpad.setPosition(touchpadX, touchpadY)
 
         stage.addActor(touchpad)
 
-        meleeButton = TextButton("Hello", skin)
-        meleeButton.setSize(meleeButtonSize, meleeButtonSize)
-        meleeButton.setPosition(meleeButtonX, meleeButtonY)
+        // --- CHAT ---
+        chatInput = TextField("", skin)
+        chatInput.setSize(300f, 40f)
+        chatInput.setPosition(
+            (Gdx.graphics.width / 2f) - 150f,
+            (Gdx.graphics.height - 50f)
+        )
+        stage.addActor(chatInput)
 
-        meleeButton.addListener(object : ClickListener() {
+        sendButton = TextButton("Send", skin)
+        sendButton.setSize(80f, 40f)
+        sendButton.setPosition(
+            (Gdx.graphics.width / 2f) + 160f,
+            (Gdx.graphics.height - 50f)
+        )
+        sendButton.addListener(object : ClickListener() {
             override fun clicked(event: InputEvent, x: Float, y: Float) {
-                network.send(GameMessage.AttackMelee().toBytes())
+                val text = chatInput.text.trim()
+                if (text.isNotEmpty()) {
+                    udpClient.sendChat("Player ${player.ID}: $text")
+                    chatInput.text = ""
+                }
             }
+        })
+        stage.addActor(sendButton)
+
+        chatGroup = VerticalGroup()
+        chatGroup.setPosition(10f, (Gdx.graphics.height - 200f))
+        chatGroup.width = 400f
+        stage.addActor(chatGroup)
+
+        // Kill log
+        killLabel = Label("", skin)
+        killLabel.setPosition(
+            (Gdx.graphics.width - 200f),
+            (Gdx.graphics.height - 60f)
+        )
+        stage.addActor(killLabel)
+
+        // --- LIGHT MELEE BUTTON ---
+        lightButton = TextButton("Light", skin)
+        lightButton.setSize(meleeButtonSize, meleeButtonSize)
+        lightButton.setPosition(
+            (Gdx.graphics.width * 0.8).toFloat(),
+            (Gdx.graphics.height * 0.15).toFloat()
+        )
+        lightButton.addListener(object : ClickListener() {
+            override fun clicked(event: InputEvent, x: Float, y: Float) {
+                network.send(GameMessage.AttackLight().toBytes())
+                localAttackTimer = attackVisualDuration
+            }
+        })
+        stage.addActor(lightButton)
+
+        // --- HEAVY MELEE BUTTON ---
+        meleeButton = TextButton("Heavy Melee", skin)
+        meleeButton.setSize(meleeButtonSize, meleeButtonSize)
+        meleeButton.setPosition(
+            (Gdx.graphics.width * 0.9).toFloat(),
+            (Gdx.graphics.height * 0.15).toFloat()
+        )
+
+        meleeButton.addListener(object : InputListener() {
+            override fun touchDown(
+                event: InputEvent?,
+                x: Float,
+                y: Float,
+                pointer: Int,
+                button: Int
+            ): Boolean {
+                isHoldingHeavy = true
+                localWindupTimer = maxWindupDuration
+                // Tell the server that we are starting the wind up so that it can complete it!
+                network.send(GameMessage.AttackHeavyWindup().toBytes())
+                return true
+            }
+
+            override fun touchUp(
+                event: InputEvent?,
+                x: Float,
+                y: Float,
+                pointer: Int,
+                button: Int
+            ) {
+                isHoldingHeavy = false
+                localWindupTimer = 0f
+                localAttackTimer = attackVisualDuration
+                network.send(GameMessage.AttackHeavy().toBytes())
+
+                super.touchUp(event, x, y, pointer, button)
+            }
+
+            //override fun clicked(event: InputEvent, x: Float, y: Float) {
+            //    network.send(GameMessage.AttackLight().toBytes())
+            //    localAttackTimer = attackVisualDuration
+            //}
         })
 
         stage.addActor(meleeButton)
+
+        // --- PARRY BUTTON ---
+        parryButton = TextButton("Parry", skin)
+        parryButton.setSize(meleeButtonSize, meleeButtonSize)
+        parryButton.setPosition(
+            (Gdx.graphics.width * 0.7).toFloat(),
+            (Gdx.graphics.height * 0.15).toFloat()
+        )
+
+        parryButton.addListener(object : ClickListener() {
+            override fun clicked(event: InputEvent, x: Float, y: Float) {
+                network.send(GameMessage.ParryStart().toBytes())
+                isParrying = true
+            }
+        })
+
+        stage.addActor(parryButton)
 
         Gdx.input.inputProcessor = stage
 
@@ -107,10 +282,24 @@ class FirstScreen : KtxScreen {
 
         // show() is called once when this screen becomes active
         // Perfect place to start the connection
-        network.connect()
-        connected = true
+        Thread {
+            val udpClient = UdpClient("255.255.255.255")
+            val discoveredHost = udpClient.discoverServer()
 
-        player.ID = network.myId
+            // UDP broadcast discovery works on real devices on the same LAN
+            // Falls back to default IP in emulator since virtual network
+            // does not support broadcast packets to 255.255.255.255
+            if (discoveredHost != null) {
+                println("Found server at $discoveredHost")
+                network.host = discoveredHost
+            } else {
+                println("No server found, falling back to default IP")
+                // Falls back to whatever host was set in NetworkClient constructor
+            }
+
+            network.connect()
+        }.start()
+        connected = true
     }
 
     override fun render(delta: Float) {
@@ -120,7 +309,7 @@ class FirstScreen : KtxScreen {
         processServerMessages()
 
         // Handle input and movement
-        handleInput(delta)
+        if (!gameOver) handleInput(delta)
 
         // Centre the camera on the player
         camera.position.set(player.X + player.size /2, player.Y + player.size / 2, 0f)
@@ -139,9 +328,77 @@ class FirstScreen : KtxScreen {
 
         // Other players in red
         shapeRenderer.color = Color.RED
-        for ((_, position) in otherPlayers) {
-            shapeRenderer.rect(position.first, position.second, player.size, player.size)
+        for (renderTarget in otherPlayers.values)
+        {
+            shapeRenderer.rect(renderTarget.X, renderTarget.Y, renderTarget.size, renderTarget.size)
+            renderTarget.drawHealthBar(shapeRenderer)
         }
+
+        // Draw the attack for the local player
+        if (localAttackTimer > 0f) {
+            shapeRenderer.color = Color.YELLOW
+            shapeRenderer.circle(player.X + player.size / 2, player.Y + player.size / 2, attackRadius)
+            localAttackTimer -= delta
+        }
+
+        // Local heavy windup
+        if (localWindupTimer > 0f) {
+            shapeRenderer.color = Color.BLUE
+            shapeRenderer.circle(player.X + player.size / 2, player.Y + player.size / 2, windupVisualRadius)
+            localWindupTimer -= delta
+        }
+
+        // Draw attack around player
+        shapeRenderer.color = Color.YELLOW
+
+        val toRemove = mutableListOf<Int>()
+        for ((id, timer) in attackVisuals)
+        {
+            val pos = otherPlayers[id]
+            if (pos != null)
+            {
+                shapeRenderer.circle(pos.X + pos.size / 2, pos.Y + pos.size / 2, attackRadius)
+                attackVisuals[id] = timer - delta
+
+                if (timer - delta <= 0f) toRemove.add(id)
+            }
+        }
+        toRemove.forEach { attackVisuals.remove(it) }
+
+        // Heavy windup — blue circle on winding up players
+        shapeRenderer.color = Color.BLUE
+        val windupToRemove = mutableListOf<Int>()
+        for ((id, timer) in windupVisuals) {
+            val pos = otherPlayers[id]
+            if (pos != null) {
+                shapeRenderer.circle(pos.X + pos.size / 2, pos.Y + pos.size / 2, windupVisualRadius)
+                windupVisuals[id] = timer - delta
+                if (timer - delta <= 0f) windupToRemove.add(id)
+            }
+        }
+        windupToRemove.forEach { windupVisuals.remove(it) }
+
+        if (isParrying || parryVisualTimer > 0f) {
+            shapeRenderer.color = if (isParrying) Color.CYAN else Color.WHITE
+            shapeRenderer.circle(
+                player.X + player.size / 2,
+                player.Y + player.size / 2,
+                18f
+            )
+            if (parryVisualTimer > 0f) parryVisualTimer -= delta
+        }
+
+        shapeRenderer.color = Color.CYAN
+        val parryToRemove = mutableListOf<Int>()
+        for ((id, timer) in parryVisuals) {
+            val pos = otherPlayers[id]
+            if (pos != null) {
+                shapeRenderer.circle(pos.X + pos.size / 2, pos.Y + pos.size / 2, 18f)
+                parryVisuals[id] = timer - delta
+                if (timer - delta <= 0f) parryToRemove.add(id)
+            }
+        }
+        parryToRemove.forEach { parryVisuals.remove(it) }
 
         shapeRenderer.end()
     }
@@ -151,13 +408,21 @@ class FirstScreen : KtxScreen {
             when (message) {
                 is GameMessage.Move -> {
                     if (message.playerID != network.myId) {
-                        otherPlayers[message.playerID.toInt()] = Pair(message.x, message.y)
+                        otherPlayers[message.playerID.toInt()]?.let {
+                            it.X = message.x
+                            it.Y = message.y
+                        }
+                    }
+                    else {
+                        // server is forcing our position (e.g respawn)
+                        player.X = message.x
+                        player.Y = message.y
                     }
                 }
 
                 is GameMessage.PlayerJoined -> {
                     if (message.playerID != network.myId) {
-                        otherPlayers[message.playerID.toInt()] = Pair(message.x, message.y)
+                        otherPlayers[message.playerID.toInt()] = OtherPlayer(message.x, message.y)
                         println("Player ${message.playerID} joined the game!")
                     }
                 }
@@ -168,15 +433,96 @@ class FirstScreen : KtxScreen {
                 }
 
                 is GameMessage.Welcome -> {
-                    // Already handled in NetworkClient
+                    // Most already handled in NetworkClient
+
+                    player.ID = network.myId
+                    // Tell the server our initial position
+                    // If this is not here, the player will not be seen at their spawn point
+                    // snapping to their moved position
+                    network.send(GameMessage.Move(x = player.X, y = player.Y).toBytes())
                 }
 
-                is GameMessage.AttackMelee -> {
-                    // TODO: show attack visual for this player
+                is GameMessage.AttackLight -> {
+                    attackVisuals[message.playerID.toInt()] = attackVisualDuration
                 }
 
                 is GameMessage.AttackResult -> {
-                    // TODO: implement data for attack
+                    // its us
+                    if (message.targetID == network.myId)
+                    {
+                        player.health = message.newHealth
+                    } else // someone else
+                    {
+                        // nullable safety: checks the case if the other player happens to not be there
+                        otherPlayers[message.targetID.toInt()]?.health = message.newHealth
+                    }
+                }
+
+                is GameMessage.AttackHeavyWindup -> {
+                    // Show blue windup circle on the attacker
+                    windupVisuals[message.playerID.toInt()] = maxWindupDuration
+                }
+
+                is GameMessage.AttackHeavy -> {
+                    // Flash orange on release
+                    attackVisuals[message.playerID.toInt()] = attackVisualDuration
+                    windupVisuals.remove(message.playerID.toInt())
+                }
+
+                is GameMessage.ParryStart -> {
+                    if (message.playerID != network.myId) {
+                        parryVisuals[message.playerID.toInt()] = parryVisualDuration
+                    }
+                }
+
+                is GameMessage.ParryResult -> {
+                    if (message.playerID == network.myId) {
+                        isParrying = false
+                        parryVisualTimer = parryVisualDuration
+                        // success = true means they parried successfully, false means window expired
+                        if (message.success) {
+                            println("Parry successful!")
+                        }
+                    }
+                }
+
+                is GameMessage.ChatMessage -> {
+                    chatMessages.add(message.message)
+                    if (chatMessages.size > 5) chatMessages.removeAt(0)
+
+                    chatGroup.clear()
+                    for (msg in chatMessages) {
+                        chatGroup.addActor(
+                            com.badlogic.gdx.scenes.scene2d.ui.Label(msg, skin)
+                        )
+                    }
+                }
+
+                is GameMessage.KillUpdate -> {
+                    killCounts[message.killerID.toInt()] = message.kills
+                    val sb = StringBuilder()
+                    for ((id, kills) in killCounts) {
+                        sb.appendLine("Player $id: $kills kills")
+                    }
+                    killLabel.setText(sb.toString())
+                }
+
+                is GameMessage.GameOver -> {
+                    gameOver = true
+                    winnerID = message.winnerID
+                    val text = if (message.winnerID == network.myId) "YOU WIN!" else "Player ${message.winnerID} Wins!"
+                    gameOverLabel.setText(text)
+                    gameOverLabel.isVisible = true
+                    restartButton.isVisible = true
+                }
+
+                is GameMessage.RestartRequest -> {}
+
+                is GameMessage.GameRestart -> {
+                    gameOver = false
+                    gameOverLabel.isVisible = false
+                    killCounts.clear()
+                    killLabel.setText("")
                 }
             }
         }

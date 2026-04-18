@@ -5,7 +5,7 @@ import java.io.DataOutputStream
 import java.net.Socket
 import java.nio.ByteBuffer
 
-class NetworkClient(private val host: String, private val port: Int) {
+class NetworkClient(var host: String, private val port: Int) {
     private var socket: Socket? = null
     private var input: DataInputStream? = null
     private var output: DataOutputStream? = null

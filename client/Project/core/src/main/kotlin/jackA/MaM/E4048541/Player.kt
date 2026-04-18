@@ -1,5 +1,7 @@
 package jackA.MaM.E4048541
 
+import com.badlogic.gdx.Gdx
+import com.badlogic.gdx.Input
 import com.badlogic.gdx.graphics.Camera
 import com.badlogic.gdx.graphics.Color
 import com.badlogic.gdx.graphics.OrthographicCamera
@@ -22,6 +24,17 @@ class Player(
 {
     fun handleInput(touchpad: Touchpad, delta: Float)
     {
+        // Debugging keys for desktop
+        if (Gdx.input.isKeyJustPressed(Input.Keys.SPACE)) {
+            sendNetworkMessage(GameMessage.AttackLight().toBytes())
+        }
+        if (Gdx.input.isKeyJustPressed(Input.Keys.H)) {
+            sendNetworkMessage(GameMessage.AttackHeavyWindup().toBytes())
+        }
+        if (Gdx.input.isKeyJustPressed(Input.Keys.P)) {
+            sendNetworkMessage(GameMessage.ParryStart().toBytes())
+        }
+
         if (touchpad.isTouched)
         {
             val touchX = touchpad.knobPercentX.toFloat()
