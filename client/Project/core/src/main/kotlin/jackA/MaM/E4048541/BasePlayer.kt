@@ -16,6 +16,12 @@ open class BasePlayer {
 
     var health: Int = 100
 
+    // Visual Feedback
+    var hitFlashTimer: Float = 0f
+    val hitFlashDuration: Float = 0.15f
+    var squishTimer: Float = 0f
+    val squishDuration: Float = 0.1f
+
     fun drawHealthBar(shapeRenderer: ShapeRenderer) {
         val barWidth = 20f
         val barHeight = 3f
@@ -34,17 +40,24 @@ open class BasePlayer {
         shapeRenderer.rect(barX, barY, barWidth * healthPercent, barHeight)
     }
 
-    fun render(shapeRenderer : ShapeRenderer, camera : OrthographicCamera)
+    fun render(shapeRenderer : ShapeRenderer, camera : OrthographicCamera, delta: Float)
     {
         shapeRenderer.projectionMatrix = camera.combined
         shapeRenderer.begin(ShapeRenderer.ShapeType.Filled)
 
         // Our player in green
-        shapeRenderer.color = Color.GREEN
+        shapeRenderer.color = if (hitFlashTimer > 0f) Color.WHITE else Color.GREEN
         shapeRenderer.rect(X, Y, size, size)
 
         // Draw our players healthbar
         // other player healthbar gets drawn in the render loop
         drawHealthBar(shapeRenderer)
+
+        if (hitFlashTimer > 0f) hitFlashTimer -= delta
+    }
+
+    fun triggerHit() {
+        hitFlashTimer = hitFlashDuration
+        squishTimer = squishDuration
     }
 }

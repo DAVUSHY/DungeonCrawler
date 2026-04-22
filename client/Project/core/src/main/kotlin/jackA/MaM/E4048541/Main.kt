@@ -31,9 +31,39 @@ class Main : KtxGame<KtxScreen>() {
 
     override fun create() {
         KtxAsync.initiate()
-
+        addScreen(LoadingScreen(this))
         addScreen(FirstScreen())
-        setScreen<FirstScreen>()
+        setScreen<LoadingScreen>()
+
+        // Run connection on background thread
+        Thread {
+            val loadingScreen = getScreen<LoadingScreen>()
+
+            val udpClient = UdpClient("255.255.255.255")
+            val discoveredHost = udpClient.discoverServer()
+
+            val network = (getScreen<FirstScreen>() as FirstScreen).network
+
+            // LibGDX UI updates must happen on the render thread, not a background one
+            // using postRunnable here queues the update safely
+            if (discoveredHost != null) {
+                Gdx.app.postRunnable { loadingScreen.setStatus("Server found! Connecting...") }
+                network.host = discoveredHost
+            } else {
+                Gdx.app.postRunnable { loadingScreen.setStatus("Connecting to default server...") }
+            }
+
+            network.connect()
+
+            // Wait for welcome message
+            while (network.myId == (-1).toShort()) {
+                Thread.sleep(100)
+            }
+
+            Gdx.app.postRunnable {
+                setScreen<FirstScreen>()
+            }
+        }.start()
     }
 }
 
@@ -42,7 +72,7 @@ class FirstScreen : KtxScreen {
 
     // Network connection — use your computer's local IP here
     // "10.0.2.2" is how the Android emulator refers to your PC's localhost
-    private val network = NetworkClient("10.0.2.2", 9999)
+    val network = NetworkClient("10.0.2.2", 9999)
 
     private val udpClient = UdpClient("10.0.2.2")
     private val chatMessages = mutableListOf<String>()
@@ -280,26 +310,8 @@ class FirstScreen : KtxScreen {
         camera.setToOrtho(false, 480f, 270f)
         camera.update()
 
-        // show() is called once when this screen becomes active
-        // Perfect place to start the connection
-        Thread {
-            val udpClient = UdpClient("255.255.255.255")
-            val discoveredHost = udpClient.discoverServer()
-
-            // UDP broadcast discovery works on real devices on the same LAN
-            // Falls back to default IP in emulator since virtual network
-            // does not support broadcast packets to 255.255.255.255
-            if (discoveredHost != null) {
-                println("Found server at $discoveredHost")
-                network.host = discoveredHost
-            } else {
-                println("No server found, falling back to default IP")
-                // Falls back to whatever host was set in NetworkClient constructor
-            }
-
-            network.connect()
-        }.start()
-        connected = true
+        // Previously handled joining and UDP here since it was the perfect place
+        // With the addition of the loading screen that had to change (now located in main)
     }
 
     override fun render(delta: Float) {
@@ -324,19 +336,30 @@ class FirstScreen : KtxScreen {
         stage.draw()
 
         // Draw players on top of the map
-        player.render(shapeRenderer, camera)
+        player.render(shapeRenderer, camera, delta)
 
         // Other players in red
         shapeRenderer.color = Color.RED
         for (renderTarget in otherPlayers.values)
         {
-            shapeRenderer.rect(renderTarget.X, renderTarget.Y, renderTarget.size, renderTarget.size)
+            val isFlashing = renderTarget.hitFlashTimer > 0f
+            val isSquishing = renderTarget.squishTimer > 0f
+
+            shapeRenderer.color = if (isFlashing) Color.WHITE else Color.RED
+
+            val drawWidth = if (isSquishing) renderTarget.size * 1.4f else renderTarget.size
+            val drawHeight = if (isSquishing) renderTarget.size * 0.7f else renderTarget.size
+
+            shapeRenderer.rect(renderTarget.X, renderTarget.Y, drawWidth, drawHeight)
             renderTarget.drawHealthBar(shapeRenderer)
+
+            if (renderTarget.hitFlashTimer > 0f) renderTarget.hitFlashTimer -= delta
+            if (renderTarget.squishTimer > 0f) renderTarget.squishTimer -= delta
         }
 
         // Draw the attack for the local player
         if (localAttackTimer > 0f) {
-            shapeRenderer.color = Color.YELLOW
+            shapeRenderer.color = Color(1f, 1f, 0f, 0.4f)
             shapeRenderer.circle(player.X + player.size / 2, player.Y + player.size / 2, attackRadius)
             localAttackTimer -= delta
         }
@@ -451,10 +474,14 @@ class FirstScreen : KtxScreen {
                     if (message.targetID == network.myId)
                     {
                         player.health = message.newHealth
+                        player.triggerHit()
                     } else // someone else
                     {
                         // nullable safety: checks the case if the other player happens to not be there
-                        otherPlayers[message.targetID.toInt()]?.health = message.newHealth
+                        otherPlayers[message.targetID.toInt()]?.let {
+                            it.health = message.newHealth
+                            it.triggerHit()
+                        }
                     }
                 }
 
