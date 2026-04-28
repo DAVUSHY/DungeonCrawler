@@ -36,6 +36,11 @@ sealed class GameMessage {
         // Game Restart
         const val TYPE_GAME_RESTART: Byte = 15
 
+        // Pick-up related
+        const val TYPE_PICKUP_COLLECTED: Byte = 16
+
+        const val TYPE_PICKUP_SPAWNED: Byte = 17
+
         // Reads the type byte and delegates to the right subclass
         fun fromBytes(buffer: ByteBuffer): GameMessage {
             val type = buffer.get()
@@ -68,6 +73,11 @@ sealed class GameMessage {
                 TYPE_RESTART_REQUEST -> RestartRequest.fromBytes(buffer)
                 // GAME RESTART
                 TYPE_GAME_RESTART -> GameRestart.fromBytes(buffer)
+
+                // PICKUP STUFF
+                TYPE_PICKUP_COLLECTED -> PickupCollected.fromBytes(buffer)
+                TYPE_PICKUP_SPAWNED -> PickupSpawned.fromBytes(buffer)
+
                 else -> throw IllegalArgumentException("Unknown message type: $type")
             }
         }
@@ -417,6 +427,45 @@ sealed class GameMessage {
         companion object {
             fun fromBytes(buffer: ByteBuffer): GameRestart{
                 return GameRestart()
+            }
+        }
+    }
+
+    // --- PICKUP ---
+    class PickupCollected(
+        val pickupID: Short,
+    ) : GameMessage(){
+        override fun toBytes(): ByteArray {
+            val payload = ByteBuffer.allocate(1 + 2)
+                .put(TYPE_PICKUP_COLLECTED)
+                .putShort(pickupID)
+                .array()
+            return wrapWithLength(payload)
+        }
+
+        companion object {
+            fun fromBytes(buffer: ByteBuffer): PickupCollected{
+                val pickupID = buffer.short
+                return PickupCollected(pickupID)
+            }
+        }
+    }
+
+    class PickupSpawned(
+        val pickupID: Short,
+    ) : GameMessage(){
+        override fun toBytes(): ByteArray {
+            val payload = ByteBuffer.allocate(1 + 2)
+                .put(TYPE_PICKUP_SPAWNED)
+                .putShort(pickupID)
+                .array()
+            return wrapWithLength(payload)
+        }
+
+        companion object {
+            fun fromBytes(buffer: ByteBuffer): PickupCollected{
+                val pickupID = buffer.short
+                return PickupCollected(pickupID)
             }
         }
     }

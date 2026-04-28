@@ -54,6 +54,18 @@ class NetworkClient(var host: String, private val port: Int) {
         }.start()
     }
 
+    fun reset() {
+        try {
+            socket?.close()
+        } catch (e: Exception) { }
+        socket = null
+        input = null
+        output = null
+        myId = -1
+
+        synchronized(incomingMessages) { incomingMessages.clear() }
+    }
+
     // Send raw bytes to the server
     fun send(bytes: ByteArray) {
         Thread {

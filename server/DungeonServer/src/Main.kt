@@ -35,6 +35,24 @@ val spawnPoints = listOf(
     Pair(403f, 60f)
 )
 
+data class HealthPickup(
+    val id: Short,
+    val x: Float,
+    val y: Float,
+    var active: Boolean = true,
+)
+
+val pickupLock = Any()
+
+val healthRestoreAmount = 30
+
+val healthPickups = listOf(
+    HealthPickup(0.toShort(), 218f, 152f),
+    HealthPickup(1.toShort(), 92f, 75f),
+    HealthPickup(2.toShort(), 400f, 160f),
+    HealthPickup(3.toShort(), 218f, 310f)
+)
+
 // How many kills to win
 val killTarget = 5
 
@@ -61,6 +79,23 @@ fun handleMessage(player: Player, message: GameMessage) {
             player.x = message.x
             player.y = message.y
             println("Player ${player.id} moved to ${message.x}, ${message.y}")
+
+            synchronized(pickupLock) {
+                for (pickup in healthPickups) {
+                    if (!pickup.active) continue
+                    val dx = player.x - pickup.x
+                    val dy = player.y - pickup.y
+                    val dist = sqrt((dx * dx) + (dy * dy))
+                    if (dist <= 12f) {
+                        val newHealth = (player.health + healthRestoreAmount).coerceAtMost(100)
+                        player.health = newHealth
+                        pickup.active = false
+                        broadcast(GameMessage.AttackResult(player.id, newHealth).toBytes())
+                        broadcast(GameMessage.PickupCollected(pickup.id).toBytes())
+                        println("Player ${player.id} picked up health, now at $newHealth")
+                    }
+                }
+            }
 
             // Broadcast to everyone with this player's ID attached
             val broadcastMsg = GameMessage.Move(player.id, message.x, message.y)
@@ -171,11 +206,25 @@ fun handleMessage(player: Player, message: GameMessage) {
                     p.kills = 0
                     respawnPlayer(p, null)
                 }
+
+                // Spawn in health packs on restart
+                synchronized(pickupLock) {
+                    for (pickup in healthPickups) {
+                        pickup.active = true
+                    }
+                }
+
                 broadcast(GameMessage.GameRestart().toBytes())
             }
         }
 
         is GameMessage.GameRestart -> {}
+
+        is GameMessage.PickupCollected -> {}
+        is GameMessage.PickupSpawned -> {
+            println("Health pickup spawned!")
+        }
+
     }
 }
 
@@ -194,6 +243,15 @@ fun handlePlayer(player: Player) {
         if (other.id != player.id) {
             val joinedMsg = GameMessage.PlayerJoined(other.id, other.x, other.y)
             sendToPlayer(player, joinedMsg.toBytes())
+        }
+    }
+
+    // Sync pickup states for the new player
+    synchronized(pickupLock) {
+        for (pickup in healthPickups) {
+            if (!pickup.active) {
+                sendToPlayer(player, GameMessage.PickupCollected(pickup.id).toBytes())
+            }
         }
     }
 
@@ -224,6 +282,7 @@ fun handlePlayer(player: Player) {
     println("Player ${player.id} disconnected")
     players.remove(player.id)
     player.socket.close()
+    restartVotes = 0  // reset so remaining players aren't stuck
 
     val leftMsg = GameMessage.PlayerLeft(player.id)
     broadcast(leftMsg.toBytes())

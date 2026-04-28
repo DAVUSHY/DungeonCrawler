@@ -28,46 +28,54 @@ import java.nio.ByteBuffer
 import kotlin.math.sqrt
 
 class Main : KtxGame<KtxScreen>() {
-
     override fun create() {
         KtxAsync.initiate()
+        addScreen(MenuScreen(this))
+        addScreen(ManualJoinScreen(this))
         addScreen(LoadingScreen(this))
-        addScreen(FirstScreen())
+        addScreen(FirstScreen(this))
+        setScreen<MenuScreen>()
+    }
+
+    fun startConnection(manualIp: String?) {
+        val loadingScreen = getScreen<LoadingScreen>()
         setScreen<LoadingScreen>()
 
         // Run connection on background thread
         Thread {
-            val loadingScreen = getScreen<LoadingScreen>()
+            val network = getScreen<FirstScreen>().network
 
-            val udpClient = UdpClient("255.255.255.255")
-            val discoveredHost = udpClient.discoverServer()
-
-            val network = (getScreen<FirstScreen>() as FirstScreen).network
-
-            // LibGDX UI updates must happen on the render thread, not a background one
-            // using postRunnable here queues the update safely
-            if (discoveredHost != null) {
-                Gdx.app.postRunnable { loadingScreen.setStatus("Server found! Connecting...") }
-                network.host = discoveredHost
+            if (manualIp != null) {
+                // Manual join using a provided IP directly
+                Gdx.app.postRunnable { loadingScreen.setStatus("Connecting to $manualIp...") }
+                network.host = manualIp
             } else {
-                Gdx.app.postRunnable { loadingScreen.setStatus("Connecting to default server...") }
+                // Quick join via UDP discovery first
+                Gdx.app.postRunnable { loadingScreen.setStatus("Searching for server...") }
+                val udpClient = UdpClient("255.255.255.255")
+                val discovered = udpClient.discoverServer()
+                // LibGDX UI updates must happen on the render thread, not a background one
+                // using postRunnable here queues the update safely
+                if (discovered != null) {
+                    Gdx.app.postRunnable { loadingScreen.setStatus("Server found! Connecting...") }
+                    network.host = discovered
+                } else {
+                    Gdx.app.postRunnable { loadingScreen.setStatus("No server found. Trying default...") }
+                }
             }
 
             network.connect()
 
-            // Wait for welcome message
             while (network.myId == (-1).toShort()) {
                 Thread.sleep(100)
             }
 
-            Gdx.app.postRunnable {
-                setScreen<FirstScreen>()
-            }
+            Gdx.app.postRunnable { setScreen<FirstScreen>() }
         }.start()
     }
 }
 
-class FirstScreen : KtxScreen {
+class FirstScreen(private val game: Main) : KtxScreen {
     private val shapeRenderer = ShapeRenderer()
 
     // Network connection — use your computer's local IP here
@@ -99,6 +107,7 @@ class FirstScreen : KtxScreen {
     private lateinit var gameOverLabel: Label
 
     private lateinit var restartButton: TextButton
+    private lateinit var quitToMenuButton: TextButton
 
     // UI
     private lateinit var skin: Skin
@@ -140,6 +149,15 @@ class FirstScreen : KtxScreen {
     private val killCounts = mutableMapOf<Int, Int>()
     private lateinit var killLabel: Label
 
+    // Pickup Related
+    private val pickupStates = mutableMapOf(0.toShort() to true, 1.toShort() to true, 2.toShort() to true, 3.toShort() to true)
+    private val pickupPositions = mapOf(
+        0.toShort() to Pair(218f, 152f),
+        1.toShort() to Pair(92f, 75f),
+        2.toShort() to Pair(400f, 160f),
+        3.toShort() to Pair(218f, 310f)
+    )
+
     // Other players which is a map of players keyed by IDs
     private val otherPlayers = mutableMapOf<Int, OtherPlayer>()
 
@@ -147,6 +165,16 @@ class FirstScreen : KtxScreen {
     private var connected = false
 
     override fun show() {
+        // Reset all game state for a fresh session
+        // This fixes weird issues like mirages of players post leave (only happened under specific stress testing)
+        otherPlayers.clear()
+        killCounts.clear()
+        gameOver = false
+        chatMessages.clear()
+        player.health = 100
+        player.X = 225f
+        player.Y = 200f
+
         // boilerplate for setting up skin and stage
         skin = Skin(Gdx.files.internal("clean-crispy/skin/clean-crispy-ui.json"))
 
@@ -165,9 +193,26 @@ class FirstScreen : KtxScreen {
             override fun clicked(event: InputEvent, x: Float, y: Float) {
                 network.send(GameMessage.RestartRequest(player.ID).toBytes())
                 restartButton.isVisible = false
+
             }
         })
         stage.addActor(restartButton)
+
+        quitToMenuButton = TextButton("Quit to Menu", skin)
+        quitToMenuButton.setSize(150f, 60f)
+        quitToMenuButton.setPosition(
+            (Gdx.graphics.width / 2f) + 90f,
+            (Gdx.graphics.height / 2f) - 80f
+        )
+        quitToMenuButton.isVisible = false
+        quitToMenuButton.addListener(object : ClickListener() {
+            override fun clicked(event: InputEvent, x: Float, y: Float) {
+                network.reset()
+                game.setScreen<MenuScreen>()
+                quitToMenuButton.isVisible = false
+            }
+        })
+        stage.addActor(quitToMenuButton)
 
         // --- GAME OVER ---
         gameOverLabel = Label("", skin)
@@ -423,6 +468,16 @@ class FirstScreen : KtxScreen {
         }
         parryToRemove.forEach { parryVisuals.remove(it) }
 
+        shapeRenderer.color = Color.GREEN
+        for ((id, active) in pickupStates) {
+            if (active) {
+                val pickup = pickupPositions[id] ?: continue
+                // Draw a simple cross shape
+                shapeRenderer.rect(pickup.first - 1f, pickup.second - 5f, 3f, 10f)
+                shapeRenderer.rect(pickup.first - 5f, pickup.second - 1f, 10f, 3f)
+            }
+        }
+
         shapeRenderer.end()
     }
 
@@ -447,12 +502,32 @@ class FirstScreen : KtxScreen {
                     if (message.playerID != network.myId) {
                         otherPlayers[message.playerID.toInt()] = OtherPlayer(message.x, message.y)
                         println("Player ${message.playerID} joined the game!")
+                        addSystemMessage("Player ${message.playerID} joined the game!")
+
+                        // If we were in a game over state, reset it
+                        // so the new player can actually play
+                        if (gameOver) {
+                            gameOver = false
+                            gameOverLabel.isVisible = false
+                            restartButton.isVisible = false
+                            quitToMenuButton.isVisible = false
+                            killCounts.clear()
+                            killLabel.setText("")
+                            addSystemMessage("New player joined — game reset!")
+                        }
                     }
                 }
 
                 is GameMessage.PlayerLeft -> {
                     otherPlayers.remove(message.playerID.toInt())
                     println("Player ${message.playerID} left the game")
+                    addSystemMessage("Player ${message.playerID} left the game.")
+
+                    // If game is over and opponent left, hide restart option
+                    if (gameOver) {
+                        restartButton.isVisible = false
+                        addSystemMessage("Opponent left. Return to menu or wait for a new player.")
+                    }
                 }
 
                 is GameMessage.Welcome -> {
@@ -541,6 +616,7 @@ class FirstScreen : KtxScreen {
                     gameOverLabel.setText(text)
                     gameOverLabel.isVisible = true
                     restartButton.isVisible = true
+                    quitToMenuButton.isVisible = true
                 }
 
                 is GameMessage.RestartRequest -> {}
@@ -548,10 +624,35 @@ class FirstScreen : KtxScreen {
                 is GameMessage.GameRestart -> {
                     gameOver = false
                     gameOverLabel.isVisible = false
+                    quitToMenuButton.isVisible = false
                     killCounts.clear()
                     killLabel.setText("")
+                    pickupStates.keys.forEach { pickupStates[it] = true }
+                }
+
+                is GameMessage.PickupCollected -> {
+                    pickupStates[message.pickupID] = false
+                    addSystemMessage("A health pickup was collected!")
+                }
+
+                is GameMessage.PickupSpawned -> {
+                    if (message.pickupID == (-1).toShort()) {
+                        // Respawn all pickups
+                        pickupStates.keys.forEach { pickupStates[it] = true }
+                    } else {
+                        pickupStates[message.pickupID] = true
+                    }
                 }
             }
+        }
+    }
+
+    private fun addSystemMessage(text: String) {
+        chatMessages.add(text)
+        if (chatMessages.size > 5) chatMessages.removeAt(0)
+        chatGroup.clear()
+        for (msg in chatMessages) {
+            chatGroup.addActor(Label(msg, skin))
         }
     }
 
