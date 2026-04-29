@@ -2,32 +2,31 @@ package jackA.MaM.E4048541
 
 import com.badlogic.gdx.Application
 import com.badlogic.gdx.Gdx
-import com.badlogic.gdx.graphics.Color
 import com.badlogic.gdx.graphics.OrthographicCamera
 import com.badlogic.gdx.graphics.glutils.ShapeRenderer
 import com.badlogic.gdx.maps.tiled.TiledMapTileLayer
 import com.badlogic.gdx.maps.tiled.TmxMapLoader
 import com.badlogic.gdx.maps.tiled.renderers.OrthogonalTiledMapRenderer
-import com.badlogic.gdx.scenes.scene2d.InputEvent
-import com.badlogic.gdx.scenes.scene2d.utils.ClickListener
-import com.badlogic.gdx.scenes.scene2d.InputListener
-import com.badlogic.gdx.scenes.scene2d.Stage
-import com.badlogic.gdx.scenes.scene2d.ui.Label
 import com.badlogic.gdx.scenes.scene2d.ui.Skin
-import com.badlogic.gdx.scenes.scene2d.ui.TextButton
-import com.badlogic.gdx.scenes.scene2d.ui.TextField
-import com.badlogic.gdx.scenes.scene2d.ui.Touchpad
-import com.badlogic.gdx.scenes.scene2d.ui.VerticalGroup
 import com.badlogic.gdx.utils.viewport.ScreenViewport
 import ktx.app.KtxGame
 import ktx.app.KtxScreen
 import ktx.app.clearScreen
 import ktx.assets.disposeSafely
 import ktx.async.KtxAsync
-import java.nio.ByteBuffer
-import kotlin.math.sqrt
 
+    /*
+                            ~Main~
+
+    Registers all screens and handles the connection flow that bridges
+    the menu screens and the game screen.
+
+    Screens are registered once and reused
+    state reset is handled by each screen's show() method.
+
+    */
 class Main : KtxGame<KtxScreen>() {
+
     override fun create() {
         KtxAsync.initiate()
         addScreen(MenuScreen(this))
@@ -37,25 +36,35 @@ class Main : KtxGame<KtxScreen>() {
         setScreen<MenuScreen>()
     }
 
+    /*
+    Initiates a server connection from a background thread
+    Called by MenuScreen (quick join) and ManualJoinScreen (manual join)
+
+    If manualIp is null, UDP broadcast discovery is attempted first
+    if failed it falls back to the default IP in NetworkClient
+
+    LibGDX UI updates must happen on the render thread (postRunnable)
+    queues status label updates safely from the background thread
+    Transitions to FirstScreen once the Welcome message confirms a connection
+
+    manualIp Server IP entered by the user, or null for auto-discovery
+
+     */
+
     fun startConnection(manualIp: String?) {
         val loadingScreen = getScreen<LoadingScreen>()
         setScreen<LoadingScreen>()
 
-        // Run connection on background thread
         Thread {
             val network = getScreen<FirstScreen>().network
 
             if (manualIp != null) {
-                // Manual join using a provided IP directly
                 Gdx.app.postRunnable { loadingScreen.setStatus("Connecting to $manualIp...") }
                 network.host = manualIp
             } else {
-                // Quick join via UDP discovery first
                 Gdx.app.postRunnable { loadingScreen.setStatus("Searching for server...") }
                 val udpClient = UdpClient("255.255.255.255")
                 val discovered = udpClient.discoverServer()
-                // LibGDX UI updates must happen on the render thread, not a background one
-                // using postRunnable here queues the update safely
                 if (discovered != null) {
                     Gdx.app.postRunnable { loadingScreen.setStatus("Server found! Connecting...") }
                     network.host = discovered
@@ -66,6 +75,7 @@ class Main : KtxGame<KtxScreen>() {
 
             network.connect()
 
+            // Poll until Welcome message confirms the server has assigned us an ID
             while (network.myId == (-1).toShort()) {
                 Thread.sleep(100)
             }
@@ -75,632 +85,151 @@ class Main : KtxGame<KtxScreen>() {
     }
 }
 
-class FirstScreen(private val game: Main) : KtxScreen {
-    private val shapeRenderer = ShapeRenderer()
+    /*
+                        ~FirstScreen~
 
-    // Network connection — use your computer's local IP here
-    // "10.0.2.2" is how the Android emulator refers to your PC's localhost
+    Intersection of the three core client systems:
+        1) GameRenderer: world space ShapeRenderer drawing
+        2) UIManager: Scene2D stage, buttons, labels
+        3) MessageHandler: incoming network message processing
+
+    All shared mutable state lives in a GameState instance, that is
+    passed to each system. FirstScreen itself handles only the
+    LibGDX lifecycle (show, render, dispose) and map/camera setup
+
+    */
+class FirstScreen(private val game: Main) : KtxScreen {
+
+    //region Network
+    /*
+        TCP client ~ public so Main.startConnection() can update the host before connecting
+
+        "10.0.2.2" is the Android emulator's alias for the host machine's localhost
+        Change to the server machine's LAN IP when testing on a real device
+     */
     val network = NetworkClient("10.0.2.2", 9999)
 
+    /*
+        UDP client used for outgoing chat messages and LAN server discovery
+        Chat is sent over UDP since dropped messages are acceptable and
+        latency matters more than guaranteed delivery for chat
+    */
     private val udpClient = UdpClient("10.0.2.2")
-    private val chatMessages = mutableListOf<String>()
-    private lateinit var chatInput: TextField
-    private lateinit var sendButton: TextButton
 
-    private lateinit var chatGroup: VerticalGroup
+    //endregion
 
-    // Map renderer
+    //region Map and Camera
     private val map = TmxMapLoader().load("DungeonMap.tmx")
     private val mapRenderer = OrthogonalTiledMapRenderer(map)
-
-    // Camera - controlling which part of the map we are looking at
     private val camera = OrthographicCamera()
+    //endregion
 
-    private val player = Player(
-        ::collidesWithWall,
-        network::send
-    )
+    //region Player
+    /*
 
-    // Win con related
-    private var gameOver = false
-    private var winnerID: Short = -1
-    private lateinit var gameOverLabel: Label
+        The local Player uses method references to avoid
+        passing NetworkClient and FirstScreen directly into Player
 
-    private lateinit var restartButton: TextButton
-    private lateinit var quitToMenuButton: TextButton
+        Keeping the Player decoupled from the network and screen layers
 
-    // UI
+    */
+    private val player = Player(::collidesWithWall, network::send)
+    //endregion
+
+    //region Systems
+    private val shapeRenderer = ShapeRenderer()
+    private val state = GameState()
     private lateinit var skin: Skin
-    private lateinit var stage: Stage
-    private lateinit var touchpad: Touchpad
-    private var touchpadX: Float = (Gdx.graphics.width * 0.1).toFloat()
-    private var touchpadY: Float = (Gdx.graphics.height * 0.15).toFloat()
-    private var touchpadSize = 200f
-
-    private lateinit var parryButton: TextButton
-    private var parryButtonX: Float = 0f
-    private var parryButtonY: Float = 0f
-
-    private var isParrying = false
-    private var parryVisualTimer = 0f
-    private val parryVisualDuration = 0.5f
-
-    private lateinit var lightButton: TextButton
-    private lateinit var meleeButton: TextButton
-    private var meleeButtonX: Float = (Gdx.graphics.width * 0.9).toFloat()
-    private var meleeButtonY: Float = (Gdx.graphics.height * 0.15).toFloat()
-    private var meleeButtonSize = 100f
-
-    private val attackVisuals = mutableMapOf<Int, Float>()
-    private val windupVisuals = mutableMapOf<Int, Float>()
-    private val parryVisuals = mutableMapOf<Int, Float>()
-    private val attackVisualDuration = 0.2f
-    private var maxWindupDuration = 2.0f
-
-    private var localAttackTimer = 0f
-    private var localWindupTimer = 0f
-
-    private val windupVisualRadius = 10f
-
-    private var isHoldingHeavy = false
-
-    val attackRadius: Float = 20.0f
-
-    private val killCounts = mutableMapOf<Int, Int>()
-    private lateinit var killLabel: Label
-
-    // Pickup Related
-    private val pickupStates = mutableMapOf(0.toShort() to true, 1.toShort() to true, 2.toShort() to true, 3.toShort() to true)
-    private val pickupPositions = mapOf(
-        0.toShort() to Pair(218f, 152f),
-        1.toShort() to Pair(92f, 75f),
-        2.toShort() to Pair(400f, 160f),
-        3.toShort() to Pair(218f, 310f)
-    )
-
-    // Other players which is a map of players keyed by IDs
-    private val otherPlayers = mutableMapOf<Int, OtherPlayer>()
-
-    // Track if we've connected yet
-    private var connected = false
+    private lateinit var ui: UIManager
+    private lateinit var renderer: GameRenderer
+    private lateinit var messageHandler: MessageHandler
+    //endregion
 
     override fun show() {
-        // Reset all game state for a fresh session
-        // This fixes weird issues like mirages of players post leave (only happened under specific stress testing)
-        otherPlayers.clear()
-        killCounts.clear()
-        gameOver = false
-        chatMessages.clear()
+        // Reset all game state to prevent stale state from previous sessions
+        // causing visual bugs like players mirages  or invisible pickups
+        state.reset()
         player.health = 100
         player.X = 225f
         player.Y = 200f
 
-        // boilerplate for setting up skin and stage
         skin = Skin(Gdx.files.internal("clean-crispy/skin/clean-crispy-ui.json"))
 
-        stage = Stage(ScreenViewport())
+        // Initialise the three subsystems, injecting shared dependencies
+        ui = UIManager(skin, network, udpClient, player, state, game)
+        ui.buildUI()
 
-        //Begin layout
+        renderer = GameRenderer(shapeRenderer, camera, player, state)
+        messageHandler = MessageHandler(network, player, state, ui)
 
-        restartButton = TextButton("Restart", skin)
-        restartButton.setSize(150f, 60f)
-        restartButton.setPosition(
-            (Gdx.graphics.width / 2f) - 75f,
-            (Gdx.graphics.height / 2f) - 80f
-        )
-        restartButton.isVisible = false
-        restartButton.addListener(object : ClickListener() {
-            override fun clicked(event: InputEvent, x: Float, y: Float) {
-                network.send(GameMessage.RestartRequest(player.ID).toBytes())
-                restartButton.isVisible = false
-
-            }
-        })
-        stage.addActor(restartButton)
-
-        quitToMenuButton = TextButton("Quit to Menu", skin)
-        quitToMenuButton.setSize(150f, 60f)
-        quitToMenuButton.setPosition(
-            (Gdx.graphics.width / 2f) + 90f,
-            (Gdx.graphics.height / 2f) - 80f
-        )
-        quitToMenuButton.isVisible = false
-        quitToMenuButton.addListener(object : ClickListener() {
-            override fun clicked(event: InputEvent, x: Float, y: Float) {
-                network.reset()
-                game.setScreen<MenuScreen>()
-                quitToMenuButton.isVisible = false
-            }
-        })
-        stage.addActor(quitToMenuButton)
-
-        // --- GAME OVER ---
-        gameOverLabel = Label("", skin)
-        gameOverLabel.setPosition(
-            (Gdx.graphics.width / 2f) - 100f,
-            (Gdx.graphics.height / 2f)
-        )
-        gameOverLabel.isVisible = false
-        stage.addActor(gameOverLabel)
-
-        // --- TOUCHPAD ---
-        touchpad = Touchpad(20f, skin)
-        touchpad.setSize(touchpadSize, touchpadSize)
-        touchpad.setPosition(touchpadX, touchpadY)
-
-        stage.addActor(touchpad)
-
-        // --- CHAT ---
-        chatInput = TextField("", skin)
-        chatInput.setSize(300f, 40f)
-        chatInput.setPosition(
-            (Gdx.graphics.width / 2f) - 150f,
-            (Gdx.graphics.height - 50f)
-        )
-        stage.addActor(chatInput)
-
-        sendButton = TextButton("Send", skin)
-        sendButton.setSize(80f, 40f)
-        sendButton.setPosition(
-            (Gdx.graphics.width / 2f) + 160f,
-            (Gdx.graphics.height - 50f)
-        )
-        sendButton.addListener(object : ClickListener() {
-            override fun clicked(event: InputEvent, x: Float, y: Float) {
-                val text = chatInput.text.trim()
-                if (text.isNotEmpty()) {
-                    udpClient.sendChat("Player ${player.ID}: $text")
-                    chatInput.text = ""
-                }
-            }
-        })
-        stage.addActor(sendButton)
-
-        chatGroup = VerticalGroup()
-        chatGroup.setPosition(10f, (Gdx.graphics.height - 200f))
-        chatGroup.width = 400f
-        stage.addActor(chatGroup)
-
-        // Kill log
-        killLabel = Label("", skin)
-        killLabel.setPosition(
-            (Gdx.graphics.width - 200f),
-            (Gdx.graphics.height - 60f)
-        )
-        stage.addActor(killLabel)
-
-        // --- LIGHT MELEE BUTTON ---
-        lightButton = TextButton("Light", skin)
-        lightButton.setSize(meleeButtonSize, meleeButtonSize)
-        lightButton.setPosition(
-            (Gdx.graphics.width * 0.8).toFloat(),
-            (Gdx.graphics.height * 0.15).toFloat()
-        )
-        lightButton.addListener(object : ClickListener() {
-            override fun clicked(event: InputEvent, x: Float, y: Float) {
-                network.send(GameMessage.AttackLight().toBytes())
-                localAttackTimer = attackVisualDuration
-            }
-        })
-        stage.addActor(lightButton)
-
-        // --- HEAVY MELEE BUTTON ---
-        meleeButton = TextButton("Heavy Melee", skin)
-        meleeButton.setSize(meleeButtonSize, meleeButtonSize)
-        meleeButton.setPosition(
-            (Gdx.graphics.width * 0.9).toFloat(),
-            (Gdx.graphics.height * 0.15).toFloat()
-        )
-
-        meleeButton.addListener(object : InputListener() {
-            override fun touchDown(
-                event: InputEvent?,
-                x: Float,
-                y: Float,
-                pointer: Int,
-                button: Int
-            ): Boolean {
-                isHoldingHeavy = true
-                localWindupTimer = maxWindupDuration
-                // Tell the server that we are starting the wind up so that it can complete it!
-                network.send(GameMessage.AttackHeavyWindup().toBytes())
-                return true
-            }
-
-            override fun touchUp(
-                event: InputEvent?,
-                x: Float,
-                y: Float,
-                pointer: Int,
-                button: Int
-            ) {
-                isHoldingHeavy = false
-                localWindupTimer = 0f
-                localAttackTimer = attackVisualDuration
-                network.send(GameMessage.AttackHeavy().toBytes())
-
-                super.touchUp(event, x, y, pointer, button)
-            }
-
-            //override fun clicked(event: InputEvent, x: Float, y: Float) {
-            //    network.send(GameMessage.AttackLight().toBytes())
-            //    localAttackTimer = attackVisualDuration
-            //}
-        })
-
-        stage.addActor(meleeButton)
-
-        // --- PARRY BUTTON ---
-        parryButton = TextButton("Parry", skin)
-        parryButton.setSize(meleeButtonSize, meleeButtonSize)
-        parryButton.setPosition(
-            (Gdx.graphics.width * 0.7).toFloat(),
-            (Gdx.graphics.height * 0.15).toFloat()
-        )
-
-        parryButton.addListener(object : ClickListener() {
-            override fun clicked(event: InputEvent, x: Float, y: Float) {
-                network.send(GameMessage.ParryStart().toBytes())
-                isParrying = true
-            }
-        })
-
-        stage.addActor(parryButton)
-
-        Gdx.input.inputProcessor = stage
-
+        Gdx.input.inputProcessor = ui.stage
         Gdx.app.logLevel = Application.LOG_DEBUG
-        // Setup the camera to show a reasonable area
-        // Since my tileset is 16px this should show 30x17
+
+        // 480x270 viewport shows 30x17 tiles at 16px tile size
         camera.setToOrtho(false, 480f, 270f)
         camera.update()
-
-        // Previously handled joining and UDP here since it was the perfect place
-        // With the addition of the loading screen that had to change (now located in main)
     }
 
     override fun render(delta: Float) {
         clearScreen(red = 0.37f, green = 0.19f, blue = 0.26f)
 
-        // Process any messages from the server
-        processServerMessages()
+        // Process network messages first so state is up to date before rendering
+        messageHandler.process()
 
-        // Handle input and movement
-        if (!gameOver) handleInput(delta)
+        // Input is frozen during game over to prevent actions after the round ends
+        if (!state.gameOver) player.handleInput(ui.touchpad, delta)
 
-        // Centre the camera on the player
-        camera.position.set(player.X + player.size /2, player.Y + player.size / 2, 0f)
+        camera.position.set(player.X + player.size / 2, player.Y + player.size / 2, 0f)
         camera.update()
 
-        // Draw the map
         mapRenderer.setView(camera)
         mapRenderer.render()
 
-        // UI rendering
-        stage.act()
-        stage.draw()
+        // UI renders ontop
+        ui.stage.act()
+        ui.stage.draw()
 
-        // Draw players on top of the map
-        player.render(shapeRenderer, camera, delta)
-
-        // Other players in red
-        shapeRenderer.color = Color.RED
-        for (renderTarget in otherPlayers.values)
-        {
-            val isFlashing = renderTarget.hitFlashTimer > 0f
-            val isSquishing = renderTarget.squishTimer > 0f
-
-            shapeRenderer.color = if (isFlashing) Color.WHITE else Color.RED
-
-            val drawWidth = if (isSquishing) renderTarget.size * 1.4f else renderTarget.size
-            val drawHeight = if (isSquishing) renderTarget.size * 0.7f else renderTarget.size
-
-            shapeRenderer.rect(renderTarget.X, renderTarget.Y, drawWidth, drawHeight)
-            renderTarget.drawHealthBar(shapeRenderer)
-
-            if (renderTarget.hitFlashTimer > 0f) renderTarget.hitFlashTimer -= delta
-            if (renderTarget.squishTimer > 0f) renderTarget.squishTimer -= delta
-        }
-
-        // Draw the attack for the local player
-        if (localAttackTimer > 0f) {
-            shapeRenderer.color = Color(1f, 1f, 0f, 0.4f)
-            shapeRenderer.circle(player.X + player.size / 2, player.Y + player.size / 2, attackRadius)
-            localAttackTimer -= delta
-        }
-
-        // Local heavy windup
-        if (localWindupTimer > 0f) {
-            shapeRenderer.color = Color.BLUE
-            shapeRenderer.circle(player.X + player.size / 2, player.Y + player.size / 2, windupVisualRadius)
-            localWindupTimer -= delta
-        }
-
-        // Draw attack around player
-        shapeRenderer.color = Color.YELLOW
-
-        val toRemove = mutableListOf<Int>()
-        for ((id, timer) in attackVisuals)
-        {
-            val pos = otherPlayers[id]
-            if (pos != null)
-            {
-                shapeRenderer.circle(pos.X + pos.size / 2, pos.Y + pos.size / 2, attackRadius)
-                attackVisuals[id] = timer - delta
-
-                if (timer - delta <= 0f) toRemove.add(id)
-            }
-        }
-        toRemove.forEach { attackVisuals.remove(it) }
-
-        // Heavy windup — blue circle on winding up players
-        shapeRenderer.color = Color.BLUE
-        val windupToRemove = mutableListOf<Int>()
-        for ((id, timer) in windupVisuals) {
-            val pos = otherPlayers[id]
-            if (pos != null) {
-                shapeRenderer.circle(pos.X + pos.size / 2, pos.Y + pos.size / 2, windupVisualRadius)
-                windupVisuals[id] = timer - delta
-                if (timer - delta <= 0f) windupToRemove.add(id)
-            }
-        }
-        windupToRemove.forEach { windupVisuals.remove(it) }
-
-        if (isParrying || parryVisualTimer > 0f) {
-            shapeRenderer.color = if (isParrying) Color.CYAN else Color.WHITE
-            shapeRenderer.circle(
-                player.X + player.size / 2,
-                player.Y + player.size / 2,
-                18f
-            )
-            if (parryVisualTimer > 0f) parryVisualTimer -= delta
-        }
-
-        shapeRenderer.color = Color.CYAN
-        val parryToRemove = mutableListOf<Int>()
-        for ((id, timer) in parryVisuals) {
-            val pos = otherPlayers[id]
-            if (pos != null) {
-                shapeRenderer.circle(pos.X + pos.size / 2, pos.Y + pos.size / 2, 18f)
-                parryVisuals[id] = timer - delta
-                if (timer - delta <= 0f) parryToRemove.add(id)
-            }
-        }
-        parryToRemove.forEach { parryVisuals.remove(it) }
-
-        shapeRenderer.color = Color.GREEN
-        for ((id, active) in pickupStates) {
-            if (active) {
-                val pickup = pickupPositions[id] ?: continue
-                // Draw a simple cross shape
-                shapeRenderer.rect(pickup.first - 1f, pickup.second - 5f, 3f, 10f)
-                shapeRenderer.rect(pickup.first - 5f, pickup.second - 1f, 10f, 3f)
-            }
-        }
-
-        shapeRenderer.end()
+        renderer.render(delta)
     }
 
-    private fun processServerMessages() {
-        for (message in network.getMessages()) {
-            when (message) {
-                is GameMessage.Move -> {
-                    if (message.playerID != network.myId) {
-                        otherPlayers[message.playerID.toInt()]?.let {
-                            it.X = message.x
-                            it.Y = message.y
-                        }
-                    }
-                    else {
-                        // server is forcing our position (e.g respawn)
-                        player.X = message.x
-                        player.Y = message.y
-                    }
-                }
+    //region Wall Collision
 
-                is GameMessage.PlayerJoined -> {
-                    if (message.playerID != network.myId) {
-                        otherPlayers[message.playerID.toInt()] = OtherPlayer(message.x, message.y)
-                        println("Player ${message.playerID} joined the game!")
-                        addSystemMessage("Player ${message.playerID} joined the game!")
-
-                        // If we were in a game over state, reset it
-                        // so the new player can actually play
-                        if (gameOver) {
-                            gameOver = false
-                            gameOverLabel.isVisible = false
-                            restartButton.isVisible = false
-                            quitToMenuButton.isVisible = false
-                            killCounts.clear()
-                            killLabel.setText("")
-                            addSystemMessage("New player joined — game reset!")
-                        }
-                    }
-                }
-
-                is GameMessage.PlayerLeft -> {
-                    otherPlayers.remove(message.playerID.toInt())
-                    println("Player ${message.playerID} left the game")
-                    addSystemMessage("Player ${message.playerID} left the game.")
-
-                    // If game is over and opponent left, hide restart option
-                    if (gameOver) {
-                        restartButton.isVisible = false
-                        addSystemMessage("Opponent left. Return to menu or wait for a new player.")
-                    }
-                }
-
-                is GameMessage.Welcome -> {
-                    // Most already handled in NetworkClient
-
-                    player.ID = network.myId
-                    // Tell the server our initial position
-                    // If this is not here, the player will not be seen at their spawn point
-                    // snapping to their moved position
-                    network.send(GameMessage.Move(x = player.X, y = player.Y).toBytes())
-                }
-
-                is GameMessage.AttackLight -> {
-                    attackVisuals[message.playerID.toInt()] = attackVisualDuration
-                }
-
-                is GameMessage.AttackResult -> {
-                    // its us
-                    if (message.targetID == network.myId)
-                    {
-                        player.health = message.newHealth
-                        player.triggerHit()
-                    } else // someone else
-                    {
-                        // nullable safety: checks the case if the other player happens to not be there
-                        otherPlayers[message.targetID.toInt()]?.let {
-                            it.health = message.newHealth
-                            it.triggerHit()
-                        }
-                    }
-                }
-
-                is GameMessage.AttackHeavyWindup -> {
-                    // Show blue windup circle on the attacker
-                    windupVisuals[message.playerID.toInt()] = maxWindupDuration
-                }
-
-                is GameMessage.AttackHeavy -> {
-                    // Flash orange on release
-                    attackVisuals[message.playerID.toInt()] = attackVisualDuration
-                    windupVisuals.remove(message.playerID.toInt())
-                }
-
-                is GameMessage.ParryStart -> {
-                    if (message.playerID != network.myId) {
-                        parryVisuals[message.playerID.toInt()] = parryVisualDuration
-                    }
-                }
-
-                is GameMessage.ParryResult -> {
-                    if (message.playerID == network.myId) {
-                        isParrying = false
-                        parryVisualTimer = parryVisualDuration
-                        // success = true means they parried successfully, false means window expired
-                        if (message.success) {
-                            println("Parry successful!")
-                        }
-                    }
-                }
-
-                is GameMessage.ChatMessage -> {
-                    chatMessages.add(message.message)
-                    if (chatMessages.size > 5) chatMessages.removeAt(0)
-
-                    chatGroup.clear()
-                    for (msg in chatMessages) {
-                        chatGroup.addActor(
-                            com.badlogic.gdx.scenes.scene2d.ui.Label(msg, skin)
-                        )
-                    }
-                }
-
-                is GameMessage.KillUpdate -> {
-                    killCounts[message.killerID.toInt()] = message.kills
-                    val sb = StringBuilder()
-                    for ((id, kills) in killCounts) {
-                        sb.appendLine("Player $id: $kills kills")
-                    }
-                    killLabel.setText(sb.toString())
-                }
-
-                is GameMessage.GameOver -> {
-                    gameOver = true
-                    winnerID = message.winnerID
-                    val text = if (message.winnerID == network.myId) "YOU WIN!" else "Player ${message.winnerID} Wins!"
-                    gameOverLabel.setText(text)
-                    gameOverLabel.isVisible = true
-                    restartButton.isVisible = true
-                    quitToMenuButton.isVisible = true
-                }
-
-                is GameMessage.RestartRequest -> {}
-
-                is GameMessage.GameRestart -> {
-                    gameOver = false
-                    gameOverLabel.isVisible = false
-                    quitToMenuButton.isVisible = false
-                    killCounts.clear()
-                    killLabel.setText("")
-                    pickupStates.keys.forEach { pickupStates[it] = true }
-                }
-
-                is GameMessage.PickupCollected -> {
-                    pickupStates[message.pickupID] = false
-                    addSystemMessage("A health pickup was collected!")
-                }
-
-                is GameMessage.PickupSpawned -> {
-                    if (message.pickupID == (-1).toShort()) {
-                        // Respawn all pickups
-                        pickupStates.keys.forEach { pickupStates[it] = true }
-                    } else {
-                        pickupStates[message.pickupID] = true
-                    }
-                }
-            }
-        }
-    }
-
-    private fun addSystemMessage(text: String) {
-        chatMessages.add(text)
-        if (chatMessages.size > 5) chatMessages.removeAt(0)
-        chatGroup.clear()
-        for (msg in chatMessages) {
-            chatGroup.addActor(Label(msg, skin))
-        }
-    }
-
-    private fun handleInput(delta: Float)
-    {
-        player.handleInput(touchpad, delta)
-    }
-
-    private fun isWall(x: Float, y: Float): Boolean
-    {
+    /*
+        Tile-based collision is used instead of Box2D since wall geometry
+        is static and only needs a binary in/out check. Box2D would
+        add significant overhead and complexity for no gameplay benefit here
+     */
+    private fun isWall(x: Float, y: Float): Boolean {
         val wallsLayer = map.layers["Walls"] as TiledMapTileLayer
+        val tileX = (x / 16).toInt()
+        val tileY = (y / 16).toInt()
 
-        // Need to convert world position to tile position which in our case is 16px
-        // E.g pixel 48 with 16 pixel tiles = tile 3 (using int to round up to tile number)
-        val tileX = (x/ 16).toInt()
-        val tileY = (y/ 16).toInt()
-
-        // If its outside the bounds of the map treat it like a wall
-        if(tileX < 0 || tileX >= wallsLayer.width || tileY < 0 || tileY >= wallsLayer.height)
+        // Treat outside the map as walls so players cant walk off the map edge
+        if (tileX < 0 || tileX >= wallsLayer.width || tileY < 0 || tileY >= wallsLayer.height)
             return true
 
-        // getCell returns null if there is no tile there
-        // if there is a tile on the walls layer its a wall!
         return wallsLayer.getCell(tileX, tileY) != null
     }
 
-    // Im using tile-based detection for walls since box2d would be overkill adding unnecessary overhead
-    // when only a simple static binary collision check is needed here
-    // Box2d will prove useful in the future with more complexity but walls not require this
-    fun collidesWithWall(x: Float, y: Float): Boolean
-    {
-        // Check all four corners of the player
-        // with a small margin (1px) so we don't get stuck on edges
-        val margin = 1f
-        val left = x + margin
-        val right = x + player.size - margin
-        val bottom = y + margin
-        val top = y + player.size - margin
+    /*
+        Checks all four corners of the players bounding box against wall tiles
 
-        return isWall(left, bottom) ||
-            isWall(right, bottom) ||
-            isWall(left, top) ||
-            isWall(right, top)
+        Axis are checked independently so the player can slide along walls
+        rather than stopping dead on contact
+     */
+    fun collidesWithWall(x: Float, y: Float): Boolean {
+        val margin = 1f
+        return isWall(x + margin, y + margin) ||
+            isWall(x + player.size - margin, y + margin) ||
+            isWall(x + margin, y + player.size - margin) ||
+            isWall(x + player.size - margin, y + player.size - margin)
     }
+
+    //endregion
 
     override fun dispose() {
         skin.dispose()
-        stage.dispose()
+        ui.dispose()
         shapeRenderer.disposeSafely()
         map.disposeSafely()
         mapRenderer.disposeSafely()
